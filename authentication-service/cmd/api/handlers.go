@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -29,11 +31,16 @@ func (app *Config) Authenticate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Println("Got user email...")
-
 	valid, err := user.PasswordMatches(requestPayload.Password)
 	if err != nil || !valid {
 		app.ErrorJson(w, errors.New("invalid credentials"), http.StatusBadRequest)
+		return
+	}
+
+	// log authentication
+	err = app.LogRequest("authentication", fmt.Sprintf("%s logged in", user.Email))
+	if err != nil {
+		app.ErrorJson(w, err)
 		return
 	}
 
@@ -44,4 +51,30 @@ func (app *Config) Authenticate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	app.WriteJson(w, http.StatusAccepted, payload)
+}
+
+func (app *Config) LogRequest(name string, data string) error {
+	var entry struct {
+		Name string `json:"name"`
+		Data string `json:"data"`
+	}
+
+	entry.Name = name
+	entry.Data = data
+
+	jsonData, _ := json.MarshalIndent(entry, "", "\t")
+	loggerUrl := "http://logger-service:8082/log"
+
+	req, err := http.NewRequest("POST", loggerUrl, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	client := &http.Client{}
+	_, err = client.Do(req)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
