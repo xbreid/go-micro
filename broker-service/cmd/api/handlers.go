@@ -2,10 +2,16 @@ package main
 
 import (
 	"broker/event"
+	"broker/logs"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"net/http"
+	"net/rpc"
+	"time"
 )
 
 type RequestPayload struct {
@@ -32,6 +38,11 @@ type LogPayload struct {
 	Data string `json:"data"`
 }
 
+type RPCPayload struct {
+	Name string
+	Data string
+}
+
 func (app *Config) Broker(w http.ResponseWriter, r *http.Request) {
 	payload := jsonResponse{
 		Error:   false,
@@ -54,7 +65,8 @@ func (app *Config) HandleSubmission(w http.ResponseWriter, r *http.Request) {
 	case "auth":
 		app.Authenticate(w, requestPayload.Auth)
 	case "log":
-		app.LogEventViaRabbit(w, requestPayload.Log)
+		app.LogItemViaRPC(w, requestPayload.Log)
+		// app.LogEventViaRabbit(w, requestPayload.Log)
 		// app.LogItem(w, requestPayload.Log)
 	case "mail":
 		app.SendMail(w, requestPayload.Mail)
@@ -211,4 +223,67 @@ func (app *Config) PushToQueue(name string, message string) error {
 	}
 
 	return nil
+}
+
+func (app *Config) LogItemViaRPC(w http.ResponseWriter, l LogPayload) {
+	client, err := rpc.Dial("tcp", "logger-service:5001")
+	if err != nil {
+		app.ErrorJson(w, err)
+		return
+	}
+
+	rpcPayload := RPCPayload{
+		Name: l.Name,
+		Data: l.Data,
+	}
+
+	var result string
+	err = client.Call("RPCServer.LogInfo", rpcPayload, &result)
+	if err != nil {
+		app.ErrorJson(w, err)
+		return
+	}
+
+	var payload jsonResponse
+	payload.Error = false
+	payload.Message = result
+
+	app.WriteJson(w, http.StatusAccepted, payload)
+}
+
+func (app *Config) LogItemViaGRPC(w http.ResponseWriter, r *http.Request) {
+	var reqestPayload RequestPayload
+
+	err := app.ReadJson(w, r, &reqestPayload)
+	if err != nil {
+		app.ErrorJson(w, err)
+		return
+	}
+
+	conn, err := grpc.Dial("logger-service:50001", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		app.ErrorJson(w, err)
+		return
+	}
+
+	defer conn.Close()
+
+	c := logs.NewLogServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err = c.WriteLog(ctx, &logs.LogRequest{LogEntry: &logs.Log{
+		Name: reqestPayload.Log.Name,
+		Data: reqestPayload.Log.Data,
+	}})
+	if err != nil {
+		app.ErrorJson(w, err)
+		return
+	}
+
+	var payload jsonResponse
+	payload.Error = false
+	payload.Message = "logged"
+
+	app.WriteJson(w, http.StatusAccepted, payload)
 }
